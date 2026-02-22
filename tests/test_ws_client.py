@@ -46,8 +46,10 @@ class FakeWebSocket:
     def settimeout(self, t):
         self._timeout = t
 
-    def close(self):
+    def close(self, status=None, reason=None):
         self.closed = True
+        self.close_status = status
+        self.close_reason = reason
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +141,67 @@ class TestSessionHelpers:
         assert sent["session"]["modalities"] == ["text", "audio"]
         assert sent["session"]["input_audio_sampling_rate"] == 24000
         assert sent["session"]["voice"] == "alloy"
+        # Default: server_vad with create_response=True, transcription enabled
+        assert sent["session"]["turn_detection"] == {
+            "type": "server_vad",
+            "create_response": True,
+        }
+        assert sent["session"]["input_audio_transcription"] == {"model": "whisper-1"}
+
+    def test_send_session_update_disable_vad(self):
+        """Passing turn_detection_type='none' explicitly disables server VAD."""
+        client = _make_client()
+        client.ws = FakeWebSocket()
+
+        client.send_session_update(
+            modalities=["text"],
+            turn_detection_type="none",
+        )
+
+        sent = json.loads(client.ws.sent[0])
+        assert sent["session"]["turn_detection"] is None
+
+    def test_send_session_update_omit_vad(self):
+        """Passing turn_detection_type=None omits the field (keeps server default)."""
+        client = _make_client()
+        client.ws = FakeWebSocket()
+
+        client.send_session_update(
+            modalities=["text"],
+            turn_detection_type=None,
+        )
+
+        sent = json.loads(client.ws.sent[0])
+        assert "turn_detection" not in sent["session"]
+
+    def test_send_session_update_with_turn_detection(self):
+        client = _make_client()
+        client.ws = FakeWebSocket()
+
+        client.send_session_update(
+            modalities=["text"],
+            turn_detection_type="server_vad",
+            create_response=True,
+        )
+
+        sent = json.loads(client.ws.sent[0])
+        assert sent["session"]["turn_detection"]["type"] == "server_vad"
+        assert sent["session"]["turn_detection"]["create_response"] is True
+
+    def test_send_session_update_with_language(self):
+        client = _make_client()
+        client.ws = FakeWebSocket()
+
+        client.send_session_update(
+            modalities=["text", "audio"],
+            input_audio_language="el",
+        )
+
+        sent = json.loads(client.ws.sent[0])
+        assert sent["session"]["input_audio_transcription"] == {
+            "model": "whisper-1",
+            "language": "el",
+        }
 
 
 class TestAudioHelpers:
@@ -199,3 +262,22 @@ class TestClose:
     def test_close_when_already_none(self):
         client = _make_client()
         client.close()  # should not raise
+
+
+class TestCloseSession:
+    def test_close_session_sends_close_frame(self):
+        client = _make_client()
+        fake_ws = FakeWebSocket()
+        client.ws = fake_ws
+
+        elapsed = client.close_session()
+        assert elapsed >= 0
+        assert fake_ws.closed
+        assert fake_ws.close_status == 1000
+        assert fake_ws.close_reason == b"conversation_end"
+        assert client.ws is None
+
+    def test_close_session_when_not_connected(self):
+        client = _make_client()
+        elapsed = client.close_session()
+        assert elapsed >= 0  # should not raise

@@ -120,23 +120,53 @@ class VoiceLiveClient:
         output_audio_format: str = "pcm16",
         sample_rate: int = 24000,
         voice: str | None = None,
-        turn_detection_type: str | None = None,
-        create_response: bool = False,
+        turn_detection_type: str | None = "server_vad",
+        create_response: bool = True,
+        input_audio_transcription_model: str | None = "whisper-1",
+        input_audio_language: str | None = None,
+        instructions: str | None = None,
     ) -> None:
-        """Send ``session.update`` with given parameters."""
+        """Send ``session.update`` with given parameters.
+
+        *turn_detection_type* defaults to ``"server_vad"`` so the server
+        detects speech boundaries automatically.  Set to ``None`` to
+        disable VAD and control turns manually via
+        ``input_audio_buffer.commit`` + ``response.create``.
+
+        *input_audio_language* accepts a BCP-47 language tag (e.g. ``"el"``,
+        ``"en"``) to hint the expected language of the input audio.
+        """
         session: dict[str, Any] = {
             "modalities": modalities,
             "input_audio_format": input_audio_format,
             "output_audio_format": output_audio_format,
             "input_audio_sampling_rate": sample_rate,
-            "turn_detection": {
-                "create_response": create_response,
-            },
         }
-        if turn_detection_type:
-            session["turn_detection"]["type"] = turn_detection_type
+
+        # Turn detection: omit → keep server default (server_vad);
+        # explicit type → use it; literal "none" → disable server VAD.
+        if turn_detection_type is not None:
+            if turn_detection_type.lower() == "none":
+                session["turn_detection"] = None
+            else:
+                session["turn_detection"] = {
+                    "type": turn_detection_type,
+                    "create_response": create_response,
+                }
+
         if voice:
             session["voice"] = voice
+
+        if input_audio_transcription_model:
+            transcription_config: dict[str, Any] = {
+                "model": input_audio_transcription_model,
+            }
+            if input_audio_language:
+                transcription_config["language"] = input_audio_language
+            session["input_audio_transcription"] = transcription_config
+
+        if instructions:
+            session["instructions"] = instructions
 
         self.send_event({"type": "session.update", "session": session})
 
@@ -169,3 +199,22 @@ class VoiceLiveClient:
         if modalities:
             event["response"] = {"modalities": modalities}
         self.send_event(event)
+
+    def close_session(self, timeout: float = 5.0) -> float:
+        """Gracefully end the conversation and close the WebSocket.
+
+        Sends a WebSocket close frame with status 1000 (normal closure),
+        waits for the server's close response, and returns the elapsed
+        close time in seconds.
+        """
+        t0 = time.perf_counter()
+        if self.ws:
+            try:
+                self.ws.close(status=1000, reason=b"conversation_end")
+            except Exception:
+                logger.debug("Error during graceful session close", exc_info=True)
+            finally:
+                self.ws = None
+        elapsed = time.perf_counter() - t0
+        logger.debug("Session closed in %.3fs", elapsed)
+        return elapsed
